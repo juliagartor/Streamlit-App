@@ -1,185 +1,209 @@
 import streamlit as st
 import random
 import pandas as pd
-import json
 from pathlib import Path
-from PIL import Image
+import requests
+from PIL import Image, ImageEnhance
 
 # App configuration
 st.set_page_config(page_title="Image Authenticity Test", layout="wide")
 
-# Title and instructions
-st.title("Which image is real?")
-st.markdown("""
-### Instructions:
-1. You'll see two images of laser printed codes on packages side by side
-2. One is a real photograph, the other is synthetically generated
-3. Click on the image you believe is the real photograph
-4. After submitting, you'll see if you were correct
-5. We'll show you 10 comparisons in total
-""")
-
 # Initialize session state for tracking progress and results
 if 'current_round' not in st.session_state:
-    st.session_state.current_round = 0
+    st.session_state.current_round = -1  # -1 for example phase, 0-9 for test rounds
     st.session_state.results = []
-    st.session_state.correct_answers = 0
-    st.session_state.method1_mistakes = 0
-    st.session_state.method2_mistakes = 0
+    st.session_state.method1_choices = 0  # For simulated method
+    st.session_state.method2_choices = 0  # For SDXL method
+    st.session_state.example_shown = False
 
-# Sample data setup (replace with your actual image paths)
+# Predefined pairs of simulated images (SDXL vs simulated)
+IMAGE_PAIRS = [
+    ('data/sdXL/sdxl_8.png', 'data/simulated/SS000020.png'),
+    ('data/sdXL/sdxl_10.png', 'data/simulated/SS000370.png'),
+    ('data/sdXL/sdxl_5.png', 'data/simulated/SS000434.png'),
+    ('data/sdXL/sdxl_1.png', 'data/simulated/SS000268.png'),
+    ('data/sdXL/sdxl_7.png', 'data/simulated/SS000430.png'),
+    ('data/sdXL/sdxl_3.png', 'data/simulated/SS000254.png'),
+    ('data/sdXL/sdxl_9.png', 'data/simulated/SS000259.png'),
+    ('data/sdXL/sdxl_2.png', 'data/simulated/SS000126.png'),
+    ('data/sdXL/sdxl_4.png', 'data/simulated/SS000274.png'),
+    ('data/sdXL/sdxl_6.png', 'data/simulated/SS000300.png')
+]
+
 def setup_image_data():
-    # This should point to your directories containing images
-    real_images = list(Path("data/real").glob("*.png"))
-    method1_synth = list(Path("data/simulated").glob("*.png"))
-    method2_synth = list(Path("data/sdXL").glob("*.png"))
-    
-    # Create pairs for comparison
     comparisons = []
-    for real_img in real_images[:10]:  # Use first 10 real images
-        # Randomly choose which method to compare against
+    for left_path, right_path in IMAGE_PAIRS:
+        # Randomize which method is on which side
         if random.random() > 0.5:
-            synth_img = random.choice(method1_synth)
-            method = "Method 1"
+            left_img, right_img = Path(left_path), Path(right_path)
+            left_method = "Stable Diffusion XL"
+            right_method = "Simulated"
         else:
-            synth_img = random.choice(method2_synth)
-            method = "Method 2"
-        
-        # Randomize left/right position
-        if random.random() > 0.5:
-            left_img, right_img = real_img, synth_img
-            correct = "left"
-        else:
-            left_img, right_img = synth_img, real_img
-            correct = "right"
+            left_img, right_img = Path(right_path), Path(left_path)
+            left_method = "Simulated"
+            right_method = "Stable Diffusion XL"
             
         comparisons.append({
             "left": left_img,
             "right": right_img,
-            "correct": correct,
-            "method": method
+            "left_method": left_method,
+            "right_method": right_method
         })
-    
     return comparisons
+
+def darken_image(image_path, factor=0.5):
+    """Factor 1.0 returns original image, lower values darken it"""
+    img = Image.open(image_path)
+    enhancer = ImageEnhance.Brightness(img)
+    darkened_img = enhancer.enhance(factor)
+    return darkened_img
 
 # Load or create the comparisons
 if 'comparisons' not in st.session_state:
     st.session_state.comparisons = setup_image_data()
-    # check if it works
     if not st.session_state.comparisons:
         st.error("No images found. Please check your image directories.")
         st.stop()
 
-# Display current comparison
-if st.session_state.current_round < len(st.session_state.comparisons):
+# Show example real images first (to maintain the illusion)
+if st.session_state.current_round == -1:
+    st.title("Package Code Close-ups")
+    st.markdown("""
+    ### First, let's look at some examples of real package codes:
+    These are close-up images of laser printed codes on real packages.
+    """)
+    
+    real_imgs_paths = [
+        "data/real/image191.png",
+        "data/real/image1328.png",
+        "data/real/image712.png",
+    ]
+    # Display 3 example real images
+    real_images = [Path(img_path) for img_path in real_imgs_paths if Path(img_path).exists()]
+    if real_images:
+        cols = st.columns(3)
+        for i, img_path in enumerate(real_images):
+            with cols[i]:
+                st.image(Image.open(img_path), caption=f"Real package code example {i+1}")
+    
+    st.markdown("""
+    ### Next, you'll see pairs of images - one real and one synthetic.
+    Your task is to identify which one is the real photograph.
+    """)
+    
+    if st.button("Start the Test"):
+        st.session_state.current_round = 0
+        st.session_state.example_shown = True
+        st.rerun()
+
+# Display test comparisons
+elif 0 <= st.session_state.current_round < len(st.session_state.comparisons):
+    st.title("Which image is real?")
+    st.markdown(f"**Round {st.session_state.current_round + 1} of {len(st.session_state.comparisons)}**")
+    
     current = st.session_state.comparisons[st.session_state.current_round]
     
     col1, col2 = st.columns(2)
     
     with col1:
-        st.image(Image.open(current["left"]), use_container_width =True)
-        if st.button("Choose Left", key="left"):
-            if current["correct"] == "left":
-                st.session_state.correct_answers += 1
-                st.success("Correct! This was the real image.")
+        # Darken only if it's Stable Diffusion XL
+        if current["left_method"] == "Stable Diffusion XL":
+            img = darken_image(current["left"], factor=0.6)  # 0.7 makes it 30% darker
+        else:
+            img = Image.open(current["left"])
+        st.image(img, use_container_width=True, caption="Image A")
+        if st.button("Choose A", key="left"):
+            # Track which method was chosen
+            if current["left_method"] == "Stable Diffusion XL":
+                st.session_state.method2_choices += 1
             else:
-                st.error("Incorrect. This was the synthetic image.")
-                # Track which method fooled the user
-                if current["method"] == "Method 1":
-                    st.session_state.method1_mistakes += 1
-                else:
-                    st.session_state.method2_mistakes += 1
+                st.session_state.method1_choices += 1
                 
             st.session_state.results.append({
                 "round": st.session_state.current_round + 1,
                 "choice": "left",
-                "correct": current["correct"] == "left",
-                "method": current["method"]
+                "method": current["left_method"]
             })
             st.session_state.current_round += 1
             st.rerun()
     
     with col2:
-        st.image(Image.open(current["right"]), use_container_width =True)
-        if st.button("Choose Right", key="right"):
-            if current["correct"] == "right":
-                st.session_state.correct_answers += 1
-                st.success("Correct! This was the real image.")
+        # Darken only if it's Stable Diffusion XL
+        if current["right_method"] == "Stable Diffusion XL":
+            img = darken_image(current["right"], factor=0.6)  # 0.7 makes it 30% darker
+        else:
+            img = Image.open(current["right"])
+        st.image(img, use_container_width=True, caption="Image B")
+        if st.button("Choose B", key="right"):
+            # Track which method was chosen
+            if current["right_method"] == "Stable Diffusion XL":
+                st.session_state.method2_choices += 1
             else:
-                st.error("Incorrect. This was the synthetic image.")
-                # Track which method fooled the user
-                if current["method"] == "Method 1":
-                    st.session_state.method1_mistakes += 1
-                else:
-                    st.session_state.method2_mistakes += 1
+                st.session_state.method1_choices += 1
                 
             st.session_state.results.append({
                 "round": st.session_state.current_round + 1,
                 "choice": "right",
-                "correct": current["correct"] == "right",
-                "method": current["method"]
+                "method": current["right_method"]
             })
             st.session_state.current_round += 1
             st.rerun()
 
-# Show results after all rounds
-# Show results after all rounds
+# Show final results
 else:
     st.balloons()
     st.success("Test completed! Thank you for participating.")
     
-    # Calculate statistics
+    # The big reveal
+    st.subheader("Surprise!")
+    st.markdown("""
+    **All the images you saw in the test were actually synthetic!**  
+    There were no real photographs in the comparison rounds.
+    
+    We showed you two different types of synthetic images:
+    - **Simulated**: Pixel manipulation method
+    - **Stable Diffusion XL**: AI-generated images
+    
+    Your choices help us understand which method appears more realistic to human observers.
+    """)
+    
     total_rounds = len(st.session_state.comparisons)
-    accuracy = (st.session_state.correct_answers / total_rounds) * 100
     
-    st.subheader("Your Results")
-    st.write(f"Correct answers: {st.session_state.correct_answers}/{total_rounds} ({accuracy:.1f}%)")
+    st.subheader("Your Preferences")
+    st.write(f"You chose 'Simulated' images {st.session_state.method1_choices} times")
+    st.write(f"You chose 'Stable Diffusion XL' images {st.session_state.method2_choices} times")
     
-    # Method comparison
-    st.subheader("Method Comparison")
-    st.write("These results show which synthetic generation method was more often mistaken for real:")
+    preferred_method = "Simulated" if st.session_state.method1_choices > st.session_state.method2_choices else "Stable Diffusion XL"
+    if st.session_state.method1_choices == st.session_state.method2_choices:
+        preferred_method = "Neither - you were equally split!"
     
-    method1_percentage = (st.session_state.method1_mistakes / total_rounds) * 100 if total_rounds > 0 else 0
-    method2_percentage = (st.session_state.method2_mistakes / total_rounds) * 100 if total_rounds > 0 else 0
-    
-    st.write("Pixel Manipulation (Method 1)", f"{st.session_state.method1_mistakes} times mistaken for real ({method1_percentage:.1f}%)")
-    st.write("Stable Diffusion XL (Method 2)", f"{st.session_state.method2_mistakes} times mistaken for real ({method2_percentage:.1f}%)")
+    st.success(f"Your preferred method was: **{preferred_method}**")
 
-    # Prepare the results data structure
-    json_path = Path("data.json")
-    
-    results_data = {
-        "correct_answers": st.session_state.correct_answers,
-        "total_rounds": total_rounds,
-        "accuracy": accuracy,
-        "method1_mistakes": st.session_state.method1_mistakes,
-        "method2_mistakes": st.session_state.method2_mistakes,
-        "detailed_results": st.session_state.results
-    }
+    # Only submit results if they haven't been submitted yet
+    if 'results_submitted' not in st.session_state:
+        # Prepare data for Google Forms submission
+        form_url = "https://docs.google.com/forms/d/e/1FAIpQLSeKjq4wiLCKbe_nVjGLuzEQ_0btWe6eeIOZzKJiUOLuaheKcA/formResponse"
+        form_data = {
+            "entry.1319823618": str(max(st.session_state.method1_choices, st.session_state.method2_choices)),
+            "entry.1994929153": str(total_rounds),
+            "entry.1844798411": preferred_method,
+            "entry.1614317066": str(st.session_state.method1_choices),
+            "entry.238554702": str(st.session_state.method2_choices),
+        }
+        
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "Referer": form_url.replace("/formResponse", "/viewform")
+            }
+            response = requests.post(form_url, data=form_data, headers=headers)
+            if response.status_code == 200:
+                st.session_state.results_submitted = True
+                st.toast("Results successfully submitted!", icon="✅")
+            else:
+                st.warning("Results couldn't be submitted automatically. Please take a screenshot of your results.")
+        except Exception as e:
+            st.warning(f"Error submitting results: {e}. Please take a screenshot of your results.")
 
-    # Check if file exists and load existing data
-    existing_data = []
-    if json_path.exists():
-        with open(json_path, "r") as f:
-            try:
-                existing_data = json.load(f)
-            except json.JSONDecodeError:
-                existing_data = []
-    
-    # Append new results
-    existing_data.append(results_data)
-    
-    # Save back to file
-    with open(json_path, "w") as f:
-        json.dump(existing_data, f, indent=4)
-    
-    st.success("Results saved successfully!")
-    
-    # Show detailed results - only one checkbox needed
-    if st.checkbox("Show detailed results", key="detailed_results_checkbox"):
+    if st.checkbox("Show detailed results"):
         st.table(pd.DataFrame(st.session_state.results))
-    
-    # Option to restart
-    if st.button("Start Over"):
-        st.session_state.clear()
-        st.rerun()
